@@ -1,0 +1,20 @@
+---
+title: "P8106 Midterm"
+author: "Brian Jo Hsuan Lee"
+date: "3/15/2022"
+output: pdf_document
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+untidied_data = read_csv("spreadspoke_score.csv")
+data = read_csv("data_tab.csv",
+                col_types = "iffffiiffddffiiif") %>% 
+  select(-1)
+  
+  
+```
+
