@@ -7,14 +7,152 @@ output: pdf_document
 
 ```{r}
 library(tidyverse)
+library(caret)
+library(corrplot)
+library(splines)
+```
+
+Clean data. Combine the historic team names with their current team ones, take the mean temperature, humidity and wind to replace NA values, and update the spread column for the favored team to that of the home team.
+```{r}
+nfl_data = read_csv("spreadspoke_score.csv", col_types = "iffffiiffddffiiic", col_select = c("schedule_season":"weather_detail")) %>%
+  mutate(
+    weather_detail = replace(weather_detail, is.na(weather_detail), "Dry"),
+    weather_detail = factor(weather_detail),
+    weather_temperature = replace(weather_temperature, is.na(weather_temperature), round(mean(weather_temperature, na.rm = T), digits = 3)),
+    weather_wind_mph = replace(weather_wind_mph, is.na(weather_wind_mph), round(mean(weather_wind_mph, na.rm = T), digits = 3)),
+    weather_humidity = replace(weather_humidity, is.na(weather_humidity),round(mean(weather_humidity, na.rm = T), digits = 3)),
+    schedule_week = fct_collapse(schedule_week, "SuperBowl" = c("Superbowl","SuperBowl"), "WildCard" = c("Wildcard","WildCard")),
+    schedule_week = fct_relevel(schedule_week, c(1:18, "WildCard", "Division", "Conference", "SuperBowl")),
+    team_home = fct_collapse(team_home, "Tennessee Titans" = c("Tennessee Titans", "Tennessee Oilers", "Houston Oilers"), "Washington Football Team" = c("Washington Football Team", "Washington Redskins"), "Las Vegas Raiders" = c("Oakland Raiders", "Los Angeles Raiders", "Las Vegas Raiders"), "Indianapolis Colts" = c("Baltimore Colts", "Indianapolis Colts"), "Los Angeles Chargers" = c("Los Angeles Chargers", "San Diego Chargers"), "Arizona Cardinals" = c("St. Louis Cardinals", "Phoenix Cardinals", "Arizona Cardinals"), "Los Angeles Rams" = c("Los Angeles Rams", "St. Louis Rams"), "New England Patriots" = c("New England Patriots", "Boston Patriots")),
+    team_away = fct_collapse(team_away, "Tennessee Titans" = c("Tennessee Titans", "Tennessee Oilers", "Houston Oilers"), "Washington Football Team" = c("Washington Football Team", "Washington Redskins"), "Las Vegas Raiders" = c("Oakland Raiders", "Los Angeles Raiders", "Las Vegas Raiders"), "Indianapolis Colts" = c("Baltimore Colts", "Indianapolis Colts"), "Los Angeles Chargers" = c("Los Angeles Chargers", "San Diego Chargers"), "Arizona Cardinals" = c("St. Louis Cardinals", "Phoenix Cardinals", "Arizona Cardinals"), "Los Angeles Rams" = c("Los Angeles Rams", "St. Louis Rams"), "New England Patriots" = c("New England Patriots", "Boston Patriots")),
+    team_away = fct_relevel(team_away, levels(team_home)),
+    team_favorite_id = recode_factor(team_favorite_id,
+                                     "MIA" = "Miami Dolphins",
+                                     "TEN" = "Tennessee Titans",
+                                     "LAC" = "Los Angeles Chargers",
+                                     "GB" = "Green Bay Packers",
+                                     "ATL" = "Atlanta Falcons",
+                                     "BUF" = "Buffalo Bills",
+                                     "DET" = "Detroit Lions",
+                                     "PIT" = "Pittsburgh Steelers",
+                                     "SF" = "San Francisco 49ers",
+                                     "ARI" = "Arizona Cardinals",
+                                     "WAS" = "Washington Football Team",
+                                     "LAR" = "Los Angeles Rams",
+                                     "CLE" = "Cleveland Browns",
+                                     "DAL" = "Dallas Cowboys",
+                                     "DEN" = "Denver Broncos",
+                                     "MIN" = "Minnesota Vikings",
+                                     "NYJ" = "New York Jets",
+                                     "LVR" = "Las Vegas Raiders",
+                                     "PHI" = "Philadelphia Eagles",
+                                     "IND" = "Indianapolis Colts",
+                                     "NE" = "New England Patriots",
+                                     "KC" = "Kansas City Chiefs",
+                                     "NYG" = "New York Giants",
+                                     "CHI" = "Chicago Bears",
+                                     "NO"= "New Orleans Saints",
+                                     "CIN" = "Cincinnati Bengals",
+                                     "SEA" = "Seattle Seahawks",
+                                     "TB" = "Tampa Bay Buccaneers",
+                                     "JAX" = "Jacksonville Jaguars",
+                                     "CAR" = "Carolina Panthers",
+                                     "BAL" = "Baltimore Ravens",
+                                     "HOU" = "Houston Texans",
+                                     .default = "None"),
+    spread_home = ifelse(as.character(team_away) == as.character(team_favorite_id), abs(spread_favorite), spread_favorite)
+  ) %>% 
+  select(-team_favorite_id, -spread_favorite) %>% 
+  filter(
+    schedule_season %in% (1979:2021)
+  ) %>% 
+  drop_na() 
 ```
 
 ```{r}
-untidied_data = read_csv("spreadspoke_score.csv")
-data = read_csv("data_tab.csv",
-                col_types = "iffffiiffddffiiif") %>% 
-  select(-1)
-  
-  
+set.seed(2022)
+
+# partition data into training and testing sets into randomized 4:1 splits
+train_index = createDataPartition(y = data$score_home, p = 0.8, list = FALSE)
+train_data = data[train_index, ]
+test_data = data[-train_index, ]
+
+# matrices of predictors 
+train_pred = model.matrix(score_home ~ ., train_data)[ ,-1]
+test_pred = model.matrix(score_home ~ ., test_data)[ ,-1]
+
+# vectors of response
+train_resp = train_data$score_home
+test_resp = test_data$score_home
 ```
+
+```{r}
+# use 5 repeats of 10-Fold CV as the resampling method
+ctrl = trainControl(method = "repeatedcv", repeats = 5, number = 10)
+```
+
+How do we get a visualization of the correlation among potential predictors?
+```{r, warning=FALSE}
+# corrplot::corrplot(cor(x), method = "circle", type="full", tl.cex = 0.5)
+```
+
+Fit linear models
+```{r, warning=FALSE}
+set.seed(2022)
+
+# Fit a linear model
+lm_fit = train(train_pred, train_resp,
+               method = "lm",
+               trControl = ctrl)
+
+# Make prediction on test data
+lm_pred = predict(lm_fit, newdata = test_pred)
+
+# Fit a lasso model
+lasso_fit = train(train_pred, train_resp,
+                  method = "glmnet",
+                  tuneGrid = expand.grid(alpha = 1, 
+                                         lambda = exp(seq(1, -3, length=100))),
+                  preProc = c("center", "scale"),
+                  trControl = ctrl)
+ggplot(lasso_fit, highlight = TRUE)
+
+# Make prediction on test data and evaluate model using test MSE
+lasso_pred = predict(lasso_fit, newdata = test_pred)
+lasso_tmse = mean((test_resp - lasso_pred)^2); lasso_tmse
+
+# Count the number of non-zeroed predictors are left in the trained model
+lasso_coef = coef(lasso_fit$finalModel, lasso_fit$bestTune$lambda)
+lasso_coef_count = lasso_coef@p[2]; lasso_coef_count
+
+# Fit an elastic net model
+enet_fit = train(train_pred, train_resp,
+                 method = "glmnet",
+                 tuneGrid = expand.grid(alpha = seq(0, 1, length = 5),
+                                        lambda = exp(seq(2, -3, length = 100))),
+                 trControl = ctrl)
+ggplot(enet_fit, highlight = TRUE)
+
+# Make prediction on test data and evaluate model using test MSE
+enet_pred = predict(enet_fit, newdata = test_pred)
+enet_tmse = mean((test_resp - enet_pred)^2); enet_tmse
+
+# Get tuning parameters alpha and lambda values
+enet_fit$bestTune
+
+# Fit a partial least squares model
+pls_fit = train(train_pred, train_resp,
+                 method = "pls",
+                 tuneGrid = data.frame(ncomp = 1:30), ## ncomp range shortened for better graphing
+                 trControl = ctrl)
+ggplot(pls_fit, highlight = TRUE)
+
+# Make prediction on test data and evaluate model using test MSE
+pls_pred = predict(pls_fit, newdata = test_pred)
+pls_tmse = mean((test_resp - pls_pred)^2); pls_tmse
+
+# Get the number of model components
+pls_fit$bestTune
+```
+
 
