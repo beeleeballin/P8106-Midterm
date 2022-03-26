@@ -12,6 +12,8 @@ library(tidyverse)
 library(corrplot)
 library(caret)
 library(splines)
+library(mgcv)
+library(earth)
 ```
 
 Clean data. Consolidate the historic team names into their corresponding current names; replace NA values in weather temperature, humidity and wind with each of their means; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete records; rid `schedule playoff` due to collinearity with the more informative `schedule week`; rid `stadium` due to speculated insignificant contribution; rid `spread_favored` and `weather details` as they are replaced by new predictors
@@ -25,6 +27,8 @@ data = read_csv("spreadspoke_score.csv",
   ) %>%
   mutate(
     schedule_season = droplevels(schedule_season),
+    stadium = droplevels(stadium),
+    dif = score_away - score_home, 
     weather_detail = replace(weather_detail, is.na(weather_detail), "Dry"),
     weather_detail = factor(weather_detail),
     weather_temperature = replace(weather_temperature, is.na(weather_temperature), round(mean(weather_temperature, na.rm = T), digits = 3)),
@@ -93,9 +97,10 @@ data = read_csv("spreadspoke_score.csv",
     rain = ifelse((as.character(weather_detail) == "Rain") | (as.character(weather_detail) == "Rain | Fog") | (as.character(weather_detail) == "Snow | Freezing Rain"), T, F),
     snow = ifelse((as.character(weather_detail) == "Snow") | (as.character(weather_detail) == "Snow | Fog"), T, F),
   ) %>% 
-  select(-schedule_playoff, -team_favorite_id, -spread_favorite, -stadium, -weather_detail) %>% 
+  select(-schedule_season, -schedule_playoff, -score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail) %>%
   drop_na()
 ```
+
 
 Partition data into training and testing sets, and define resampling method.
 
@@ -103,24 +108,24 @@ Partition data into training and testing sets, and define resampling method.
 set.seed(2022)
 
 # partition data into training and testing sets into randomized 4:1 splits
-train_index = createDataPartition(y = data$score_home, p = 0.8, list = FALSE)
+train_index = createDataPartition(y = data$dif, p = 0.8, list = FALSE)
 train_data = data[train_index, ]
 train_cont_data = 
   train_data %>% 
-  select(score_home, score_away, over_under_line, spread_home, weather_temperature, weather_wind_mph, weather_humidity)
+  select(dif, over_under_line, spread_home, weather_temperature, weather_wind_mph, weather_humidity)
 test_data = data[-train_index, ]
 
 # matrices of predictors 
-train_pred = model.matrix(score_home ~ ., train_data)[ ,-1]
-train_cont_pred = model.matrix(score_home ~ ., train_cont_data)[ ,-1]
-test_pred = model.matrix(score_home ~ ., test_data)[ ,-1]
+train_pred = model.matrix(dif ~ ., train_data)[ ,-1]
+train_cont_pred = model.matrix(dif ~ ., train_cont_data)[ ,-1]
+test_pred = model.matrix(dif ~ ., test_data)[ ,-1]
 
 # vectors of response
-train_resp = train_data$score_home
-test_resp = test_data$score_home
+train_resp = train_data$dif
+test_resp = test_data$dif
 
 # use 5 repeats of 10-Fold CV as the resampling method
-ctrl = trainControl(method = "repeatedcv", repeats = 5, number = 10)
+ctrl = trainControl(method = "repeatedcv", repeats = 2, number = 5)
 ```
 
 Visualize of the correlation among continuous variables, and the linearity among continuous predictors against the response. 
@@ -142,9 +147,9 @@ featurePlot(train_cont_pred, train_resp,
 
 Fit a k-nearest neighbor model. Might have to rely on the Cluster.
 
-```{r, eval=F}
+```{r}
 set.seed(2022)
-k_grid = expand.grid(k = seq(from = 1, to = 5, by = 1))
+k_grid = expand.grid(k = seq(from = 3, to = 10, by = 1))
 
 knn_fit = train(train_pred, train_resp,
                 method = "knn",
@@ -250,13 +255,46 @@ pls_tmse = mean((test_resp - pls_pred)^2); pls_tmse
 pls_fit$bestTune
 ```
 
-Fit nonilinear models. Might have to rely on the Cluster.
+Fit nonlinear models. Might have to rely on the Cluster.
 
-```{r, eval=F}
-mars_grid = expand.grid(degree = 1:3, nprune = 2:20)
+```{r}
+gam_fit = train(train_pred, train_resp,
+                method = "gam",
+                tuneGrid = data.frame(method = "GCV.Cp", select = c(TRUE, FALSE)),
+                trControl = ctrl)
+
 mars_fit = train(train_pred, train_resp,
                  method = "earth",
-                 tuneGrid = mars_grid,
+                 tuneGrid = expand.grid(degree = 1:3, nprune = 2:20),
                  trControl = ctrl)
+```
+
+```{r}
+bwplot(
+  resamples(
+    list(linear = lm_fit,
+         knn = knn_fit,
+         ridge = ridge_fit,
+         lasso = lasso_fit,
+         enet = enet_fit, 
+         pcr = pcr_fit,
+         pls = pls_fit,
+         gam = gam_fit,
+         mars = mars_fit)
+    ),
+  metric = "RMSE")
+
+
+summary(resamples(
+    list(linear = lm_fit,
+         knn = knn_fit,
+         ridge = ridge_fit,
+         lasso = lasso_fit,
+         enet = enet_fit, 
+         pcr = pcr_fit,
+         pls = pls_fit,
+         gam = gam_fit,
+         mars = mars_fit)
+    ))
 ```
 
