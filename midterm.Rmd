@@ -1,7 +1,7 @@
 ---
 title: "P8106 Midterm"
 author: "Brian Jo Hsuan Lee"
-date: "3/15/2022"
+date: "3/26/2022"
 output: pdf_document
 ---
 
@@ -16,10 +16,10 @@ library(mgcv)
 library(earth)
 ```
 
-Clean data. Consolidate the historic team names into their corresponding current names; replace NA values in weather temperature, humidity and wind with each of their means; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete records; rid `schedule playoff` due to collinearity with the more informative `schedule week`; rid `stadium` due to speculated insignificant contribution; rid `spread_favored` and `weather details` as they are replaced by new predictors
+Clean data. Consolidate the historic team names into their corresponding current names; replace NA values in weather temperature, humidity and wind speed with each of their grand averages; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete betting line records; rid `schedule playoff` due to colinearity with the more informative `schedule week`; rid `spread_favored` and `weather details` as they are replaced by updated predictors; rid miscellaneous rows with empty values. 
 
 ```{r}
-data = read_csv("spreadspoke_score.csv", 
+data_eda = read_csv("spreadspoke_score.csv", 
                     col_types = "iffffiiffddffiiic", 
                     col_select = c("schedule_season":"weather_detail")) %>%
   filter(
@@ -97,12 +97,15 @@ data = read_csv("spreadspoke_score.csv",
     rain = ifelse((as.character(weather_detail) == "Rain") | (as.character(weather_detail) == "Rain | Fog") | (as.character(weather_detail) == "Snow | Freezing Rain"), T, F),
     snow = ifelse((as.character(weather_detail) == "Snow") | (as.character(weather_detail) == "Snow | Fog"), T, F),
   ) %>% 
-  select(-schedule_season, -schedule_playoff, -score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail) %>%
+  select(-score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail) %>%
   drop_na()
+
+data = 
+  data_eda %>% 
+  select(-schedule_season, -schedule_playoff)
 ```
 
-
-Partition data into training and testing sets, and define resampling method.
+Partition data into training and testing sets, and define the resampling method.
 
 ```{r}
 set.seed(2022)
@@ -115,6 +118,9 @@ train_cont_data =
   select(dif, over_under_line, spread_home, weather_temperature, weather_wind_mph, weather_humidity)
 test_data = data[-train_index, ]
 
+# save a expanded version of training data for exploratory data analysis
+train_data_eda = data_eda[train_index, ]
+
 # matrices of predictors 
 train_pred = model.matrix(dif ~ ., train_data)[ ,-1]
 train_cont_pred = model.matrix(dif ~ ., train_cont_data)[ ,-1]
@@ -124,14 +130,21 @@ test_pred = model.matrix(dif ~ ., test_data)[ ,-1]
 train_resp = train_data$dif
 test_resp = test_data$dif
 
-# use 5 repeats of 10-Fold CV as the resampling method
+# use 2 repeats of 5-Fold CV since our dataset is rather large for our computing machines to run the typical 
+# 5 repeat 10-Fold CV
 ctrl = trainControl(method = "repeatedcv", repeats = 2, number = 5)
 ```
 
-Visualize of the correlation among continuous variables, and the linearity among continuous predictors against the response. 
-```{r, warning=FALSE}
-corrplot(cor(train_cont_data), method = "circle", type="full", tl.cex = 0.5)
+Visualize the distribution of our training data before analysis.
 
+```{r, warning=FALSE}
+# observe little to no correlation among continuous variables
+corrplot(cor(train_cont_data), 
+         method = "circle", 
+         type="lower", 
+         tl.cex = 0.5)
+
+# observe no evident sign of non-linearity among continuous predictors against the response
 data_theme1 = trellis.par.get()
 data_theme1$plot.symbol$col = rgb(.2, .4, .2, .5)
 data_theme1$plot.symbol$pch = 16
@@ -141,23 +154,87 @@ data_theme1$strip.background$col = rgb(.0, .2, .6, .2)
 trellis.par.set(data_theme1)
 
 featurePlot(train_cont_pred, train_resp, 
-            plot = "scatter", labels = c("", "Home Team Score"),
+            plot = "scatter", labels = c("", "Score Difference (Away - Home)"),
             type = c("p"), layout = c(2, 3))
+
+# observe relatively consistent weather information over the years
+train_data_eda %>% 
+  mutate(
+    schedule_season = as.numeric(as.character(schedule_season))
+  ) %>% 
+  group_by(schedule_season) %>% 
+  summarize(mean_temp = mean(weather_temperature), mean_hum = mean(weather_humidity), mean_wind = mean(weather_wind_mph)) %>% 
+  pivot_longer(
+    mean_temp: mean_wind,
+    names_to = 'means',
+    values_to = 'vals'
+  ) %>%
+  ggplot(aes(x = schedule_season, y = vals, color = means)) + 
+  geom_line() +
+  labs(
+    title = "Average Humidity, Temperature and Wind Speeds across 40+ NFL Seasons",
+    x = "",
+    y = "Weather Values"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 10),
+    legend.position = "bottom"
+  ) +
+  scale_colour_discrete(labels = c('Humidity', 'Temperature (F)', "Wind Speed (MPH)"))
+
+# observe similar proportions of significant games played by each team as the home team. 
+team_order = 
+  train_data_eda %>% 
+  count(team_home, schedule_playoff) %>% 
+  group_by(team_home) %>% 
+  mutate(
+    schedule_playoff = case_when(schedule_playoff == TRUE ~ "playoff",
+                                 schedule_playoff == FALSE ~ "regular"
+    )
+  ) %>% 
+  pivot_wider(
+    names_from = schedule_playoff,
+    values_from = n
+  ) %>% 
+  mutate(
+    prop = playoff / (playoff + regular)
+  ) %>% 
+  arrange(desc(prop))
+
+team_order = fct_inorder(team_order$team_home)
+  
+train_data_eda %>% 
+  count(team_home, schedule_week) %>% 
+  mutate(
+    team_home = fct_relevel(team_home, levels(team_order)),
+  ) %>% 
+  ggplot(aes(x = team_home, y = n, fill = schedule_week)) + 
+  geom_col() +
+  labs(
+    title = "Number of Games by Week Played by Each Team as the Home Team",
+    x = "Team",
+    y = "Count",
+    fill = 'Schedule Week'
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 10),
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    axis.title.x = element_blank(),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.key.size = unit(0.3, 'cm')
+  )
 ```
 
-Fit a k-nearest neighbor model. Might have to rely on the Cluster.
+Fit a k-nearest neighbor model.
 
 ```{r}
 set.seed(2022)
-k_grid = expand.grid(k = seq(from = 3, to = 10, by = 1))
 
 knn_fit = train(train_pred, train_resp,
                 method = "knn",
                 trControl = ctrl,
-                tuneGrid = k_grid)
-ggplot(knn_fit)
-
-knn_fit$bestTune[1,1]
+                tuneGrid = expand.grid(k = seq(from = 45, to = 65, by = 1)))
 ```
 
 Fit linear models
@@ -170,9 +247,6 @@ lm_fit = train(train_pred, train_resp,
                method = "lm",
                trControl = ctrl)
 
-# Make prediction on test data
-lm_pred = predict(lm_fit, newdata = test_pred)
-
 # Fit a ridge model (L2 regularization, alpha = 0)
 ridge_fit = train(train_pred, train_resp,
                   method = "glmnet",
@@ -180,18 +254,6 @@ ridge_fit = train(train_pred, train_resp,
                                          lambda = exp(seq(-2, 3, length=100))),
                   preProc = c("center", "scale"),
                   trControl = ctrl)
-ggplot(ridge_fit, highlight = TRUE) # could xTrans = log from plot() be implemented somehow?
-
-# Get the optimal penalty term lambda
-ridge_fit$bestTune
-
-# Make prediction on test data and evaluate model using test MSE
-ridge_pred = predict(ridge_fit, newdata = test_pred)
-ridge_tmse = mean((test_resp - ridge_pred)^2); ridge_tmse
-
-# Count the number of non-zeroed predictors are left in the trained model
-ridge_coef = coef(ridge_fit$finalModel, ridge_fit$bestTune$lambda)
-ridge_coef_count = ridge_coef@p[2]; ridge_coef_count
 
 # Fit a lasso model (L1 regularization, alpha = 1)
 lasso_fit = train(train_pred, train_resp,
@@ -200,18 +262,6 @@ lasso_fit = train(train_pred, train_resp,
                                          lambda = exp(seq(-3, -1, length=100))),
                   preProc = c("center", "scale"),
                   trControl = ctrl)
-ggplot(lasso_fit, highlight = TRUE)
-
-# Get the optimal penalty term lambda
-lasso_fit$bestTune
-
-# Make prediction on test data and evaluate model using test MSE
-lasso_pred = predict(lasso_fit, newdata = test_pred)
-lasso_tmse = mean((test_resp - lasso_pred)^2); lasso_tmse
-
-# Count the number of non-zeroed predictors are left in the trained model
-lasso_coef = coef(lasso_fit$finalModel, lasso_fit$bestTune$lambda)
-lasso_coef_count = lasso_coef@p[2]; lasso_coef_count
 
 # Fit an elastic net model (L1 & L2 regularization, alpha = [0,1])
 enet_fit = train(train_pred, train_resp,
@@ -219,57 +269,86 @@ enet_fit = train(train_pred, train_resp,
                  tuneGrid = expand.grid(alpha = seq(0, 1, length = 5),
                                         lambda = exp(seq(1, -3, length = 100))),
                  trControl = ctrl)
-ggplot(enet_fit, highlight = TRUE)
-
-# Get tuning parameters alpha and lambda values. Alpha = 1, which matches lasso?
-enet_fit$bestTune
-
-# Make prediction on test data and evaluate model using test MSE
-enet_pred = predict(enet_fit, newdata = test_pred)
-enet_tmse = mean((test_resp - enet_pred)^2); enet_tmse
 
 # Fit a principle component model
 pcr_fit = train(train_pred, train_resp,
                   method = "pcr",
-                  tuneGrid = data.frame(ncomp = 1:20),
+                  tuneGrid = data.frame(ncomp = 1:14),
                   trControl = ctrl,
                   scale = TRUE)
-ggplot(pcr_fit, highlight = TRUE)
 
-# Make prediction on test data and evaluate model using test MSE
-pcr_pred = predict(pcr_fit, newdata = test_pred)
-pcr_tmse = mean((test_resp - pcr_pred)^2); pcr_tmse
 
 # Fit a partial least squares model
 pls_fit = train(train_pred, train_resp,
                  method = "pls",
-                 tuneGrid = data.frame(ncomp = 1:20), ## ncomp range shortened for better graphing
+                 tuneGrid = data.frame(ncomp = 1:14), ## ncomp range shortened for better graphing
                  trControl = ctrl)
-ggplot(pls_fit, highlight = TRUE)
-
-# Make prediction on test data and evaluate model using test MSE
-pls_pred = predict(pls_fit, newdata = test_pred)
-pls_tmse = mean((test_resp - pls_pred)^2); pls_tmse
-
-# Get the number of model components
-pls_fit$bestTune
 ```
 
-Fit nonlinear models. Might have to rely on the Cluster.
+Fit nonlinear models.
 
 ```{r}
+set.seed(2022)
+
+# Fit a generalized additive model
 gam_fit = train(train_pred, train_resp,
                 method = "gam",
                 tuneGrid = data.frame(method = "GCV.Cp", select = c(TRUE, FALSE)),
                 trControl = ctrl)
 
+# Fit a multivariate adaptive regression spline model
 mars_fit = train(train_pred, train_resp,
                  method = "earth",
                  tuneGrid = expand.grid(degree = 1:3, nprune = 2:20),
                  trControl = ctrl)
 ```
 
+Display the chosen model
+
 ```{r}
+# ggplot(knn_fit)
+# knn_fit$bestTune[1,1]
+# 
+# ggplot(ridge_fit, highlight = TRUE) # could xTrans = log from plot() be implemented somehow?
+# # Get the optimal penalty term lambda
+# ridge_fit$bestTune
+# # # Count the number of non-zeroed predictors are left in the trained model
+# # ridge_coef = coef(ridge_fit$finalModel, ridge_fit$bestTune$lambda)
+# # ridge_coef_count = ridge_coef@p[2]; ridge_coef_count
+# 
+# ggplot(lasso_fit, highlight = TRUE)
+# # Get the optimal penalty term lambda
+# lasso_fit$bestTune
+# # # Count the number of non-zeroed predictors are left in the trained model
+# # lasso_coef = coef(lasso_fit$finalModel, lasso_fit$bestTune$lambda)
+# # lasso_coef_count = lasso_coef@p[2]; lasso_coef_count
+# 
+# ggplot(enet_fit, highlight = TRUE)
+# # Get tuning parameters alpha and lambda values. Alpha = 1, which matches lasso?
+# enet_fit$bestTune
+#
+# ggplot(pcr_fit, highlight = TRUE)
+# # Get the number of model components
+# pcr_fit$bestTune
+
+ggplot(pls_fit, highlight = TRUE)
+# Get the number of model components
+pls_fit$bestTune
+```
+
+Compile and display validation RMSE
+
+```{r, warning=F}
+resamp = resamples(list(linear = lm_fit,
+                        knn = knn_fit,
+                        ridge = ridge_fit,
+                        lasso = lasso_fit,
+                        enet = enet_fit, 
+                        pcr = pcr_fit,
+                        pls = pls_fit,
+                        gam = gam_fit,
+                        mars = mars_fit))
+
 bwplot(
   resamples(
     list(linear = lm_fit,
@@ -283,18 +362,53 @@ bwplot(
          mars = mars_fit)
     ),
   metric = "RMSE")
-
-
-summary(resamples(
-    list(linear = lm_fit,
-         knn = knn_fit,
-         ridge = ridge_fit,
-         lasso = lasso_fit,
-         enet = enet_fit, 
-         pcr = pcr_fit,
-         pls = pls_fit,
-         gam = gam_fit,
-         mars = mars_fit)
-    ))
 ```
+
+Calcualte and display test RMSE
+
+```{r, warning=F}
+# calculate predicted values
+knn_pred = predict(knn_fit, newdata = test_pred)
+lm_pred = predict(lm_fit, newdata = test_pred)
+ridge_pred = predict(ridge_fit, newdata = test_pred)
+lasso_pred = predict(lasso_fit, newdata = test_pred)
+enet_pred = predict(enet_fit, newdata = test_pred)
+pcr_pred = predict(pcr_fit, newdata = test_pred)
+pls_pred = predict(pls_fit, newdata = test_pred)
+gam_pred = predict(gam_fit, newdata = test_pred)
+mars_pred = predict(mars_fit, newdata = test_pred)
+
+# join all RMSE into a dataframe
+test_rmse = 
+  tibble(
+    knn = sqrt((test_resp - knn_pred)^2),
+ linear = sqrt((test_resp - lm_pred)^2),
+  ridge = sqrt((test_resp - ridge_pred)^2),
+  lasso = sqrt((test_resp - lasso_pred)^2),
+   enet = sqrt((test_resp - enet_pred)^2),
+    pcr = sqrt((test_resp - pcr_pred)^2),
+    pls = sqrt((test_resp - pls_pred)^2),
+    gam = sqrt((test_resp - gam_pred)^2),
+   mars = sqrt((test_resp - mars_pred)^2)
+  ) %>% 
+  pivot_longer(
+    knn:mars,
+    names_to = 'name',
+    values_to = 'value'
+  )
+
+# diplay it the same way validation set RSME is displayed
+ggplot(test_rmse, aes(x = name, y = value)) + 
+  geom_boxplot() +
+  coord_flip() +
+  labs(
+    title = "Test Errors Across All Fitted Models",
+    y = "RMSE"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.title.y = element_blank()
+  )
+```
+
 
